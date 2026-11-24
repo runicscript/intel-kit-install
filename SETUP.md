@@ -108,16 +108,31 @@ INTEL_KIT_LICENSE_KEY='用户的激活码' python3 bootstrap.py
 
 - 默认：预算 `0` = 只用免费源 + 你（agent）自己的模型额度（`host_agent`）
 
-### 问题 9 —（条件）知识库
+### 问题 9 — 知识库
 
-仅当预算 `> 0` 且输出为文件夹或 GitHub 时询问。告诉用户：知识库功能在 v2，目前保持关闭。
+要不要把每天的卡片整理成一本按主题分页的知识库？
+
+- 默认：要；放在 `~/.intel-kit/wiki`，Obsidian 能直接打开
+- 新页默认先写到 `review.md` 提议；用户说「自动建页」才改为自动创建
+
+**9a** 分几个库、每个库收什么、不收什么  
+- 默认：一个库，按问题 1 的主题
+
+**9b** 先放几个你最关心的主题当起始页  
+- 默认：不填，让它自己提议
+
+**9c** 有没有不想写进知识库的内容  
+- 默认：融资金额、估值、定价、财报、单纯的新品发布
+
+**9d** 每次最多让模型干多少活  
+- 默认：每次最多 20 次模型调用；超出的留到下次
 
 ---
 
 ## 4) 复述与写入
 
-1. 用短列表复述全部答案，等待用户说「对」或「可以」。
-2. 写入 `answers.json`（放在用户指定的工作目录或 `~/.intel-kit/` 旁，路径告知用户）。
+1. 用短列表复述全部答案（含知识库：是否开启、路径、库、起始页、禁写、建页方式、预算），等待用户说「对」或「可以」。
+2. 写入 `answers.json`（放在用户指定的工作目录或 `~/.intel-kit/` 旁，路径告知用户）。其中 `wiki` 段字段：`enabled`、`path`、`libraries`（每项 `id`/`name`/`covers`/`excludes`）、`seed_pages`、`never_write`、`new_pages`（`propose`|`auto`）、`budget.max_model_calls_per_run`。
 3. 运行：
 
 ```bash
@@ -126,6 +141,7 @@ INTEL_KIT_LICENSE_KEY='用户的激活码' python3 bootstrap.py
 ```
 
 4. 若有错误，与用户一起修到通过为止。
+5. 若 `wiki.enabled`：再运行 `~/.intel-kit/bin/intel wiki init`。
 
 ---
 
@@ -142,9 +158,10 @@ INTEL_KIT_LICENSE_KEY='用户的激活码' python3 bootstrap.py
 ## 6) 真跑一次
 
 1. 按 `~/.intel-kit/app/current/RUN.md` 执行（通常覆盖约 24 小时窗口）。
-2. 给用户看 **3 张样例卡片**和当天摘要。
-3. 问：「这样的可以吗？哪条不该收？」
-4. 把反馈写进 `intel.yaml` 的 `must_keep` / `must_drop`，再 `intel validate`。
+2. 若 `wiki.enabled`：再跑 `~/.intel-kit/bin/intel wiki compile`。若退出码 **10**：按 RUN.md 同样方式处理——读 `wiki-requests.jsonl`、写回 `wiki-responses.jsonl`，再 `intel wiki compile --resume <run_id>`。完成后给用户看 **一页** 有改动的知识库页面。
+3. 给用户看 **3 张样例卡片**和当天摘要。
+4. 问：「这样的可以吗？哪条不该收？」
+5. 把反馈写进 `intel.yaml` 的 `must_keep` / `must_drop`，再 `intel validate`。
 
 ---
 
@@ -152,7 +169,7 @@ INTEL_KIT_LICENSE_KEY='用户的激活码' python3 bootstrap.py
 
 **只有用户明确说可以 / OK 之后**才安排定时。
 
-1. 运行 `~/.intel-kit/bin/intel schedule`，拿到提示词/说明。
+1. 运行 `~/.intel-kit/bin/intel schedule`，拿到提示词/说明（routine：`run` → `digest` → `wiki compile`）。
 2. **Grok Bot**：用该提示词创建 routine。
 3. **WorkBuddy**：创建**本地**定时任务（完全访问权限），内容为该提示词；告知用户触发时间。
 4. 用户未点头前，绝不创建定时。
