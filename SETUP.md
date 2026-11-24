@@ -71,7 +71,7 @@ INTEL_KIT_LICENSE_KEY='用户的激活码' python3 bootstrap.py
 ~/.intel-kit/bin/intel presets
 ```
 
-把结果列给用户。说明：带「同款」的包是**作者本人在用的规则**。
+把结果列给用户。预设只有：`ai-builder`（默认）、`design-ui`、`blank`。
 
 - 默认：`ai-builder`
 
@@ -86,7 +86,7 @@ INTEL_KIT_LICENSE_KEY='用户的激活码' python3 bootstrap.py
 - **X（Twitter）默认关闭。**
 - 若用户要开 X：先说明费用——
   - Grok Bot：可用自带读取工具；
-  - 其他平台：需要 X 官方付费接口，按作者 55 个账号的量估算，约每月 **15–40 美元**（估算，未实测，账号越多越贵），须用户自己充值并**明确同意**后再开。
+  - 其他平台：需要 X 官方付费接口（按读取条数收费，账号越多越贵），必须用户自己充值并明确同意后才开。
 
 ### 问题 4 — 什么算有用
 
