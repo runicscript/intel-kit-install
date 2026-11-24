@@ -11,6 +11,7 @@ import os
 import platform
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -20,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 __version__ = "0.1.0"
 CLIENT = f"bootstrap/{__version__}"
@@ -34,10 +35,21 @@ EXIT_DEVICE_LIMIT = 3
 EXIT_DAILY_CAP = 4
 EXIT_NETWORK = 5
 EXIT_VERIFY = 6
+EXIT_DEPS = 7
+
+_SSL_HINT = (
+    "证书校验失败。macOS 可运行 Python 的 Install Certificates.command，"
+    "或设置 SSL_CERT_FILE 指向 CA 证书包。"
+)
+_DEPS_HINT = "需要 python3 的 venv 和 pip，可联网安装依赖"
 
 
 class VerificationError(Exception):
     """Package verification or safe-unpack failure."""
+
+
+class DepsError(Exception):
+    """Virtualenv creation or pip install failure."""
 
 
 class APIError(Exception):
@@ -323,8 +335,41 @@ def mask_key(key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers
+# HTTP helpers / SSL
 # ---------------------------------------------------------------------------
+
+def _ssl_context() -> ssl.SSLContext:
+    """Build a verifying SSL context; honour SSL_CERT_FILE, prefer certifi."""
+    cafile = os.environ.get("SSL_CERT_FILE")
+    if cafile and Path(cafile).is_file():
+        return ssl.create_default_context(cafile=cafile)
+    try:
+        import certifi  # optional; may be absent on bare stdlib installs
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def _is_cert_error(exc: BaseException) -> bool:
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(exc, ssl.SSLError):
+        msg = str(exc).upper()
+        return "CERTIFICATE" in msg or "CERT" in msg
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException):
+        return _is_cert_error(reason)
+    cause = getattr(exc, "__cause__", None)
+    if isinstance(cause, BaseException):
+        return _is_cert_error(cause)
+    return False
+
+
+def _print_ssl_hint_if_needed(exc: BaseException) -> None:
+    if _is_cert_error(exc):
+        print(_SSL_HINT, file=sys.stderr)
+
 
 def _http_json(
     method: str,
@@ -342,7 +387,7 @@ def _http_json(
         hdrs["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
             raw = resp.read()
             status = resp.getcode()
             if not raw:
@@ -357,16 +402,18 @@ def _http_json(
         if "error" not in payload:
             payload["error"] = "network"
         raise APIError(payload.get("error", "network"), payload.get("message") or message_for_error(payload.get("error", "network")), e.code) from e
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, TimeoutError, OSError, ssl.SSLError) as e:
+        _print_ssl_hint_if_needed(e)
         raise APIError("network", message_for_error("network"), 0) from e
 
 
 def _download(url: str, dest: Path, expected_size: Optional[int] = None, timeout: float = 60.0) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": CLIENT})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
             data = resp.read()
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ssl.SSLError) as e:
+        _print_ssl_hint_if_needed(e)
         raise APIError("network", message_for_error("network"), 0) from e
     if expected_size is not None and len(data) != expected_size:
         raise VerificationError(f"下载大小不符：期望 {expected_size}，实际 {len(data)}")
@@ -518,14 +565,14 @@ def _atomic_point_current(app_dir: Path, version_dir: Path) -> None:
 def write_launcher(home: Path) -> None:
     bin_dir = home / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    current_src = home / "app" / "current" / "src"
     if platform.system() == "Windows":
-        # intel.cmd — use current.txt if no symlink
+        # intel.cmd — use current.txt if no symlink; prefer venv python
         cmd = home / "bin" / "intel.cmd"
         cmd.write_text(
             "@echo off\r\n"
             "setlocal\r\n"
             f'set "IK_HOME={home}"\r\n'
+            'set "INTEL_KIT_HOME=%IK_HOME%"\r\n'
             'if exist "%IK_HOME%\\app\\current\\src" (\r\n'
             '  set "PP=%IK_HOME%\\app\\current\\src"\r\n'
             ") else (\r\n"
@@ -533,18 +580,62 @@ def write_launcher(home: Path) -> None:
             '  set "PP=%CUR%\\src"\r\n'
             ")\r\n"
             'set "PYTHONPATH=%PP%"\r\n'
-            'python -m intelkit.cli %*\r\n',
+            'if exist "%IK_HOME%\\venv\\Scripts\\python.exe" (\r\n'
+            '  set "PY=%IK_HOME%\\venv\\Scripts\\python.exe"\r\n'
+            ") else (\r\n"
+            '  set "PY=python3"\r\n'
+            ")\r\n"
+            '"%PY%" -m intelkit.cli %*\r\n',
             encoding="utf-8",
         )
     sh = home / "bin" / "intel"
     sh.write_text(
         "#!/bin/sh\n"
         f'HOME_IK="{home}"\n'
+        'export INTEL_KIT_HOME="$HOME_IK"\n'
         'export PYTHONPATH="$HOME_IK/app/current/src"\n'
-        'exec python3 -m intelkit.cli "$@"\n',
+        'if [ -x "$HOME_IK/venv/bin/python" ]; then\n'
+        '  PY="$HOME_IK/venv/bin/python"\n'
+        "else\n"
+        "  PY=python3\n"
+        "fi\n"
+        'exec "$PY" -m intelkit.cli "$@"\n',
         encoding="utf-8",
     )
     os.chmod(sh, 0o755)
+
+
+def install_deps(home: Path, version_dir: Path) -> None:
+    """Create/refresh <home>/venv and pip-install version_dir/requirements.txt."""
+    venv_dir = home / "venv"
+    req = version_dir / "requirements.txt"
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(venv_dir)],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise DepsError(_DEPS_HINT) from e
+
+    if platform.system() == "Windows":
+        vpy = venv_dir / "Scripts" / "python.exe"
+    else:
+        vpy = venv_dir / "bin" / "python"
+    if not vpy.is_file():
+        raise DepsError(_DEPS_HINT)
+
+    if not req.is_file():
+        return
+
+    try:
+        subprocess.run(
+            [str(vpy), "-m", "pip", "install", "-q", "-r", str(req)],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise DepsError(_DEPS_HINT) from e
 
 
 def write_license_json(home: Path, license_id: str, version: str, update_expires_at: Any) -> None:
@@ -614,7 +705,14 @@ def run_check(key: str, home: Path, api_url: str) -> int:
     return EXIT_OK
 
 
-def run_install(key: str, home: Path, api_url: str) -> int:
+def run_install(
+    key: str,
+    home: Path,
+    api_url: str,
+    *,
+    skip_deps: bool = False,
+    install_deps_fn: Optional[Callable[[Path, Path], None]] = None,
+) -> int:
     ensure_home_dir(home)
     fp = device_fingerprint()
     cur = installed_version(home)
@@ -646,6 +744,8 @@ def run_install(key: str, home: Path, api_url: str) -> int:
     license_id = data["license_id"]
     update_expires_at = data.get("update_expires_at")
 
+    deps_fn = install_deps_fn if install_deps_fn is not None else install_deps
+
     tmpdir = Path(tempfile.mkdtemp(prefix="intel-kit-dl-"))
     pkg_path = tmpdir / "package.tar.gz"
     sig_path = tmpdir / "package.tar.gz.minisig"
@@ -661,10 +761,22 @@ def run_install(key: str, home: Path, api_url: str) -> int:
         app_dir.mkdir(parents=True, exist_ok=True)
         print(f"正在解压到 {app_dir / version} …")
         version_dir = safe_unpack(pkg_path, app_dir, version)
+        # Deps before switching current — install stays atomic
+        if not skip_deps:
+            print("正在创建虚拟环境并安装依赖…")
+            try:
+                deps_fn(home, version_dir)
+            except DepsError:
+                raise
+            except Exception as e:
+                raise DepsError(_DEPS_HINT) from e
         _atomic_point_current(app_dir, version_dir)
         write_launcher(home)
         write_license_json(home, license_id, version, update_expires_at)
         write_env_key(home, key)
+    except DepsError:
+        print(_DEPS_HINT, file=sys.stderr)
+        return EXIT_DEPS
     except VerificationError as e:
         print(message_for_error("verification"), file=sys.stderr)
         print(str(e), file=sys.stderr)
@@ -695,6 +807,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--home", type=Path, help="安装目录（默认 ~/.intel-kit）")
     parser.add_argument("--api", dest="api_url", help="API 基址")
     parser.add_argument("--check", action="store_true", help="仅检查版本")
+    parser.add_argument(
+        "--skip-deps",
+        action="store_true",
+        help="跳过 venv/pip 依赖安装（测试用）",
+    )
     args = parser.parse_args(argv)
 
     home = (args.home or default_home()).expanduser()
@@ -710,7 +827,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.check:
         return run_check(key, home, api_url)
-    return run_install(key, home, api_url)
+    return run_install(key, home, api_url, skip_deps=args.skip_deps)
 
 
 if __name__ == "__main__":

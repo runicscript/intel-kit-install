@@ -51,6 +51,7 @@ INTEL_KIT_LICENSE_KEY='用户的激活码' python3 bootstrap.py
 | 4 | 今日下载次数已达上限 |
 | 5 | 网络错误 |
 | 6 | 软件包校验失败（未安装） |
+| 7 | 依赖安装失败（需要 python3 的 venv 和 pip，可联网安装依赖；未切换 current） |
 
 成功后脚本会提示：安装完成，进入第 3 步采访。
 

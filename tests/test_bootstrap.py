@@ -289,6 +289,7 @@ class TestEndToEndInstall(unittest.TestCase):
                     key=LICENSE_KEY,
                     home=home,
                     api_url=self.api,
+                    skip_deps=True,
                 )
             self.assertEqual(code, 0)
             version_dir = home / "app" / "0.1.0"
@@ -317,7 +318,9 @@ class TestEndToEndInstall(unittest.TestCase):
             buf_err = io.StringIO()
             with mock.patch.object(bootstrap, "verify_signature", return_value=True):
                 with mock.patch("sys.stdout", buf_out), mock.patch("sys.stderr", buf_err):
-                    code = bootstrap.run_install(key=LICENSE_KEY, home=home, api_url=self.api)
+                    code = bootstrap.run_install(
+                        key=LICENSE_KEY, home=home, api_url=self.api, skip_deps=True
+                    )
             self.assertEqual(code, 0)
             combined = buf_out.getvalue() + buf_err.getvalue()
             self.assertNotIn(LICENSE_KEY, combined)
@@ -336,8 +339,116 @@ class TestEndToEndInstall(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as tmp:
                     home = Path(tmp) / "home"
                     home.mkdir()
-                    code = bootstrap.run_install(key=LICENSE_KEY, home=home, api_url=self.api)
+                    code = bootstrap.run_install(
+                        key=LICENSE_KEY, home=home, api_url=self.api, skip_deps=True
+                    )
                     self.assertEqual(code, expected)
+
+    def test_deps_failure_exits_7_no_current_switch(self):
+        def boom_deps(home, version_dir):
+            raise bootstrap.DepsError("venv failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            # Pre-existing current must not be replaced on deps failure
+            app = home / "app"
+            app.mkdir()
+            old = app / "0.0.9"
+            old.mkdir()
+            (old / "VERSION").write_text("0.0.9\n", encoding="utf-8")
+            bootstrap._atomic_point_current(app, old)
+
+            buf_err = io.StringIO()
+            with mock.patch.object(bootstrap, "verify_signature", return_value=True):
+                with mock.patch("sys.stderr", buf_err):
+                    code = bootstrap.run_install(
+                        key=LICENSE_KEY,
+                        home=home,
+                        api_url=self.api,
+                        install_deps_fn=boom_deps,
+                    )
+            self.assertEqual(code, 7)
+            err = buf_err.getvalue()
+            self.assertIn("venv", err)
+            self.assertIn("pip", err)
+            self.assertRegex(err, r"[\u4e00-\u9fff]")
+            current = home / "app" / "current"
+            if current.is_symlink():
+                self.assertEqual(current.resolve(), old.resolve())
+            else:
+                txt = (home / "app" / "current.txt").read_text(encoding="utf-8").strip()
+                self.assertEqual(Path(txt).resolve(), old.resolve())
+            # New version unpacked but not switched
+            self.assertTrue((home / "app" / "0.1.0").is_dir())
+
+
+class TestLauncher(unittest.TestCase):
+    def test_launcher_exports_intel_kit_home_and_venv_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "ik"
+            home.mkdir()
+            bootstrap.write_launcher(home)
+            sh = home / "bin" / "intel"
+            self.assertTrue(sh.is_file())
+            text = sh.read_text(encoding="utf-8")
+            self.assertIn("INTEL_KIT_HOME", text)
+            self.assertIn("venv/bin/python", text)
+            self.assertIn("PYTHONPATH", text)
+            self.assertIn("app/current/src", text)
+            self.assertIn("python3", text)  # fallback
+            cmd = home / "bin" / "intel.cmd"
+            # Always written on non-Windows too for content check? production writes
+            # intel.cmd only on Windows. Check platform branch via mock.
+            with mock.patch("bootstrap.platform.system", return_value="Windows"):
+                bootstrap.write_launcher(home)
+            cmd_text = (home / "bin" / "intel.cmd").read_text(encoding="utf-8")
+            self.assertIn("INTEL_KIT_HOME", cmd_text)
+            self.assertIn(r"venv\Scripts\python.exe", cmd_text)
+            self.assertIn("PYTHONPATH", cmd_text)
+            self.assertIn(r"app\current\src", cmd_text)
+
+
+class TestSslContext(unittest.TestCase):
+    def test_ssl_honours_ssl_cert_file(self):
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            ca = f.name
+            f.write(b"-----BEGIN CERTIFICATE-----\nMIIBkTCB+wI=\n-----END CERTIFICATE-----\n")
+        try:
+            with mock.patch.dict(os.environ, {"SSL_CERT_FILE": ca}, clear=False):
+                with mock.patch("ssl.create_default_context") as m:
+                    m.return_value = mock.Mock()
+                    bootstrap._ssl_context()
+                    m.assert_called_once_with(cafile=ca)
+        finally:
+            os.unlink(ca)
+
+    def test_ssl_uses_certifi_when_importable(self):
+        fake_certifi = mock.Mock()
+        fake_certifi.where.return_value = "/fake/cacert.pem"
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SSL_CERT_FILE", None)
+            with mock.patch.dict(sys.modules, {"certifi": fake_certifi}):
+                with mock.patch("ssl.create_default_context") as m:
+                    m.return_value = mock.Mock()
+                    bootstrap._ssl_context()
+                    m.assert_called_once_with(cafile="/fake/cacert.pem")
+
+    def test_certificate_error_prints_chinese_hint(self):
+        import ssl
+        import urllib.error
+
+        exc = urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+        buf_err = io.StringIO()
+        with mock.patch("urllib.request.urlopen", side_effect=exc):
+            with mock.patch("sys.stderr", buf_err):
+                with self.assertRaises(bootstrap.APIError):
+                    bootstrap._http_json("GET", "https://example.invalid/v1/x")
+        err = buf_err.getvalue()
+        self.assertRegex(err, r"[\u4e00-\u9fff]")
+        self.assertTrue(
+            "SSL_CERT_FILE" in err or "Install Certificates" in err or "证书" in err
+        )
 
 
 class TestEnvPermsAndUntouched(unittest.TestCase):
