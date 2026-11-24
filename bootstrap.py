@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional
 
 __version__ = "0.1.0"
 CLIENT = f"bootstrap/{__version__}"
-DEFAULT_API = "https://intel-kit-dl.REPLACE_ME.workers.dev"
+DEFAULT_API = "https://intel-kit-dl.runicscript7.workers.dev"
 # Release public key (minisign base64 body only).
 PUBKEY = "RWS5EBqsqD2Wxxb5n6/8HmrpgL8hXrSKuTK3nj/Ur2vSB7i6zYIL+giq"
 
