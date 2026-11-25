@@ -456,7 +456,7 @@ def _is_within(base: Path, target: Path) -> bool:
         return False
 
 
-def safe_unpack(tar_path: Path, dest_parent: Path, version: str) -> Path:
+def safe_unpack(tar_path: Path, dest_parent: Path, version: str, *, only: Optional[str] = None) -> Path:
     """Unpack package into dest_parent/<version>/ which contains intel-kit contents.
 
     Archive must have a single top directory intel-kit-<version>/.
@@ -464,10 +464,6 @@ def safe_unpack(tar_path: Path, dest_parent: Path, version: str) -> Path:
     """
     expected_top = f"intel-kit-{version}"
     dest = dest_parent / version
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True, exist_ok=True)
-
     with tarfile.open(tar_path, "r:*") as tf:
         members = tf.getmembers()
         if not members:
@@ -509,6 +505,26 @@ def safe_unpack(tar_path: Path, dest_parent: Path, version: str) -> Path:
 
         if tops != {expected_top}:
             raise VerificationError(f"安装包顶层目录必须是 {expected_top}/")
+
+        if only == "podcast":
+            root = f"{expected_top}/podcast-kit"
+            required = {
+                f"{expected_top}/VERSION",
+                f"{root}/SETUP.md",
+                *(f"{root}/skills/{name}/SKILL.md" for name in (
+                    "podcast-collector", "wiki-editor", "wiki-reader"
+                )),
+            }
+            regular = {m.name for m in members if m.isreg()}
+            if not required <= regular:
+                raise VerificationError("当前授权版本缺少播客模块，请检查发行版本")
+            members = [m for m in members if m.name == f"{expected_top}/VERSION"
+                       or m.name == root or m.name.startswith(root + "/")]
+            if any(not (m.isreg() or m.isdir()) for m in members):
+                raise VerificationError("播客安装只支持普通文件和目录")
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
 
         for m in members:
             norm = m.name.replace("\\", "/")
@@ -712,10 +728,21 @@ def run_install(
     *,
     skip_deps: bool = False,
     install_deps_fn: Optional[Callable[[Path, Path], None]] = None,
+    only: Optional[str] = None,
 ) -> int:
     ensure_home_dir(home)
     fp = device_fingerprint()
     cur = installed_version(home)
+    pointer = home / "app" / "current"
+    if (home / "app" / "current.txt").is_file():
+        pointer = Path((home / "app" / "current.txt").read_text(encoding="utf-8").strip())
+    if cur and pointer.is_dir():
+        existing_podcast = (pointer / "podcast-kit" / "SETUP.md").is_file() and not (pointer / "src").exists()
+        if existing_podcast:
+            only = "podcast"
+        elif only == "podcast":
+            print("请选择独立的播客安装目录；现有通用安装仍在使用。", file=sys.stderr)
+            return EXIT_INVALID
     print(f"正在激活（{mask_key(key)}）…")
     try:
         _status, data = _http_json(
@@ -760,9 +787,12 @@ def run_install(
         app_dir = home / "app"
         app_dir.mkdir(parents=True, exist_ok=True)
         print(f"正在解压到 {app_dir / version} …")
-        version_dir = safe_unpack(pkg_path, app_dir, version)
+        if only == "podcast" and pointer.is_dir() and pointer.resolve() == (app_dir / version).resolve():
+            print(f"播客版已安装：{pointer / 'podcast-kit' / 'SETUP.md'}")
+            return EXIT_OK
+        version_dir = safe_unpack(pkg_path, app_dir, version, only=only)
         # Deps before switching current — install stays atomic
-        if not skip_deps:
+        if not skip_deps and only != "podcast":
             print("正在创建虚拟环境并安装依赖…")
             try:
                 deps_fn(home, version_dir)
@@ -771,7 +801,8 @@ def run_install(
             except Exception as e:
                 raise DepsError(_DEPS_HINT) from e
         _atomic_point_current(app_dir, version_dir)
-        write_launcher(home)
+        if only != "podcast":
+            write_launcher(home)
         write_license_json(home, license_id, version, update_expires_at)
         write_env_key(home, key)
     except DepsError:
@@ -788,7 +819,10 @@ def run_install(
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    print("安装完成。下一步：按 SETUP.md 第 3 步开始问用户问题。")
+    if only == "podcast":
+        print(f"播客版安装完成。请读取 {version_dir / 'podcast-kit' / 'SETUP.md'}")
+    else:
+        print("安装完成。下一步：按 SETUP.md 第 3 步开始问用户问题。")
     return EXIT_OK
 
 
@@ -807,6 +841,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--home", type=Path, help="安装目录（默认 ~/.intel-kit）")
     parser.add_argument("--api", dest="api_url", help="API 基址")
     parser.add_argument("--check", action="store_true", help="仅检查版本")
+    parser.add_argument("--only", choices=["podcast"], help="只安装指定工作流")
     parser.add_argument(
         "--skip-deps",
         action="store_true",
@@ -814,7 +849,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    home = (args.home or default_home()).expanduser()
+    default = (Path.home() / ".intel-kit-podcast"
+               if args.only and not os.environ.get("INTEL_KIT_HOME") else default_home())
+    home = (args.home or default).expanduser()
     api_url = args.api_url or os.environ.get("INTEL_KIT_API") or DEFAULT_API
     try:
         key = resolve_key(args.key)
@@ -827,7 +864,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.check:
         return run_check(key, home, api_url)
-    return run_install(key, home, api_url, skip_deps=args.skip_deps)
+    return run_install(key, home, api_url, skip_deps=args.skip_deps, only=args.only)
 
 
 if __name__ == "__main__":
