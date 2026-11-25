@@ -1,6 +1,6 @@
 ---
 name: guaikei-search
-description: 用户明确要求时，通过怪可检索抖音公开视频或小红书公开笔记。需要用户自行开通 Token 和批准付费请求。
+description: 用户明确要求时，通过怪可检索抖音公开视频、小红书公开笔记或微信公开文章和视频。需要用户自行开通 Token 和批准付费请求。
 ---
 
 # 怪可社媒检索
@@ -10,7 +10,7 @@ description: 用户明确要求时，通过怪可检索抖音公开视频或小�
 ## 接入
 
 1. 请用户打开 [怪可官网](https://www.guaikei.com/) 自行登录，核对当前价格和账户余额，再按需开通私有 Token。充值由用户自行完成。怪可是第三方数据服务。
-2. 检查 Node.js 版本至少为 16.14。按用户选择接入一个上游 Skill：抖音使用 [guaikei/dy-feedback](https://github.com/guaikei/dy-feedback)，小红书使用 [guaikei/xhs-feedback](https://github.com/guaikei/xhs-feedback)。使用经过核对的上游版本，按其说明配置到用户选择的工作区。先阅读上游代码和配置说明，遇到宿主授权提示则等待用户确认。
+2. 检查 Node.js 版本至少为 16.14。按用户选择接入一个上游 Skill：抖音使用 [guaikei/dy-feedback](https://github.com/guaikei/dy-feedback)，小红书使用 [guaikei/xhs-feedback](https://github.com/guaikei/xhs-feedback)，微信使用 [um-why/wechat-search-sou](https://clawhub.ai/um-why/skills/wechat-search-sou)。使用经过核对的上游版本，按其说明配置到用户选择的工作区。先阅读上游代码和配置说明，遇到宿主授权提示则等待用户确认。
 3. 请用户在宿主的安全变量配置界面设置 `GUAIKEI_API_TOKEN`。执行前只检查该变量是否存在。Token 仅用于怪可的 API 请求，避免写入提示词、日志、命令行参数和代码仓库。
 
 ## 关键词搜索
@@ -20,8 +20,12 @@ description: 用户明确要求时，通过怪可检索抖音公开视频或小�
 ```bash
 node src/douyin/search-cli.js --keyword "AI 教程" --limit 1
 node src/xiaohongshu/search-cli.js --keyword "AI 教程" --limit 1
+node scripts/wechat/article-cli.js --keyword "AI 教程" --limit 1
+node scripts/wechat/video-cli.js --keyword "AI 教程" --limit 1
 ```
 
-按用户选择只执行对应平台的一条命令。搜索关键词会发给怪可。首次验收检查退出码、JSON 状态与公开来源链接；空结果单独说明。出现 `AUTH_REQUIRED` 时停止并引导检查密钥。余额不足、限额或网络失败时报告原因并停止，避免重复付费请求。默认按次检索；需要定时监测时，另行确认关键词、频率和费用预算。
+微信需先确认搜文章还是搜视频。文章搜索提供标题、作者、时间和链接，正文需要单独读取公开页面。视频结果可能只有标识符，按实际返回报告。
+
+按用户选择只执行对应平台和内容类型的一条命令。搜索关键词会发给怪可。首次验收检查退出码、JSON 状态，以及返回的公开来源链接或结果标识符；空结果单独说明。出现 `AUTH_REQUIRED` 时停止并引导检查密钥。余额不足、限额或网络失败时报告原因并停止，避免重复付费请求。默认按次检索；需要定时监测时，另行确认关键词、频率和费用预算。
 
 只输出用户指定范围内的公开内容及其来源链接。默认采用本次会话输出，用户明确要求时再摘要归档。
